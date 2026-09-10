@@ -22,6 +22,7 @@
         }
         #mission { margin-top: 6px; color: #fff; text-shadow: 0 0 5px #00ffff; }
         #sensor-status { color: #8aa9b8; font-size: 13px; max-width: 80vw; }
+        #relay-status { margin-top: 6px; color: #a9bac4; font-size: 12px; line-height: 1.4; }
     </style>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/effects/StereoEffect.js"></script>
@@ -32,6 +33,7 @@
 <div id="ui-layer">
     ЭНЕРГИЯ: <span id="energy-val">10.0</span>%<br>
     <span id="mission">РЕТРАНСЛЯТОРЫ: 0/3</span>
+    <div id="relay-status">1 ПИСК: НЕ НАСТРОЕН<br>2 ГУЛ: НЕ НАСТРОЕН<br>3 СКРЕЖЕТ: НЕ НАСТРОЕН</div>
 </div>
 
 <div id="overlay">
@@ -60,7 +62,7 @@ let lastPointerX = 0;
 let lastPointerY = 0;
 let manualYaw = 0;
 let manualPitch = 0;
-const useStereo = new URLSearchParams(location.search).has('stereo');
+const useStereo = !new URLSearchParams(location.search).has('mono');
 
 const subGroup = new THREE.Group();
 const relays = [];
@@ -115,7 +117,7 @@ function init() {
 
     // ОСВЕЩЕНИЕ
     // Эмбиент свет синего тона, чтобы скалы не уходили в абсолютную темноту
-    scene.add(new THREE.AmbientLight(0x0a3850, 1.8));
+    scene.add(new THREE.AmbientLight(0x30343a, 0.65));
 
     // Слабый габаритный свет помогает видеть кабину, но не убирает тьму вокруг.
     localLight = new THREE.PointLight(0x00ffff, 1.4, 8.0);
@@ -158,54 +160,38 @@ function init() {
 }
 
 function createCaves() {
-    // Яркая синевато-каменная текстура с подсвеченными контурами
+    // Один цельный тоннель без щелей между отдельными сегментами.
     const wallMaterial = new THREE.MeshPhongMaterial({
-        color: 0x16465c,
-        emissive: 0x0a2d40,
-        shininess: 5,
+        color: 0x303840,
+        emissive: 0x080a0c,
+        shininess: 3,
         flatShading: true,
         side: THREE.DoubleSide
     });
 
     const wireMaterial = new THREE.MeshBasicMaterial({
-        color: 0x00ffff,
+        color: 0x6d7b84,
         wireframe: true,
         transparent: true,
-        opacity: 0.2,
+        opacity: 0.12,
         side: THREE.DoubleSide
     });
 
-    const numSegments = 40;
-    for (let i = 0; i < numSegments; i++) {
-        const zPos = -i * 10;
-        const radius = 6 + Math.sin(i * 0.7) * 2.5;
-
-        const segmentGeo = new THREE.CylinderGeometry(radius, radius, 10, 12, 2, true);
-
-        // Деформация геометрии
-        const pos = segmentGeo.attributes.position;
-        for (let j = 0; j < pos.count; j++) {
-            pos.setX(j, pos.getX(j) + (Math.random() - 0.5) * 2.5);
-            pos.setY(j, pos.getY(j) + (Math.random() - 0.5) * 2.5);
-        }
-
-        segmentGeo.computeVertexNormals();
-
-        const wallMesh = new THREE.Mesh(segmentGeo, wallMaterial);
-        // Разворачиваем цилиндр вдоль тоннеля Z
-        wallMesh.rotation.x = Math.PI / 2;
-        wallMesh.position.set(
+    const pathPoints = [];
+    for (let i = 0; i <= 40; i++) {
+        pathPoints.push(new THREE.Vector3(
             i === 0 ? 0 : Math.sin(i * 0.4) * 5,
             i === 0 ? 0 : Math.cos(i * 0.3) * 3,
-            zPos
-        );
-
-        const wireMesh = new THREE.Mesh(segmentGeo, wireMaterial);
-        wallMesh.add(wireMesh);
-
-        scene.add(wallMesh);
-        caveColliders.push(wallMesh);
+            -i * 10
+        ));
     }
+    const tunnelPath = new THREE.CatmullRomCurve3(pathPoints);
+    const tunnelGeo = new THREE.TubeGeometry(tunnelPath, 160, 8.5, 16, false);
+    const wallMesh = new THREE.Mesh(tunnelGeo, wallMaterial);
+    const wireMesh = new THREE.Mesh(tunnelGeo, wireMaterial);
+    wallMesh.add(wireMesh);
+    scene.add(wallMesh);
+    caveColliders.push(wallMesh);
 }
 
 function createPlankton() {
@@ -287,26 +273,55 @@ function createRelays() {
     ];
 
     relayData.forEach((data) => {
-        const geo = new THREE.CylinderGeometry(0.8, 0.8, 4.0, 16);
-        const mat = new THREE.MeshPhongMaterial({ color: data.color, emissive: data.color, emissiveIntensity: 0.25 });
-        const mesh = new THREE.Mesh(geo, mat);
+        const mesh = new THREE.Group();
+        const body = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.85, 1.05, 3.6, 12),
+            new THREE.MeshPhongMaterial({ color: 0x27343b, metalness: 0.8, roughness: 0.35 })
+        );
+        const ring = new THREE.Mesh(
+            new THREE.TorusGeometry(1.05, 0.12, 8, 20),
+            new THREE.MeshBasicMaterial({ color: data.color })
+        );
+        ring.rotation.x = Math.PI / 2;
+        const antenna = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.08, 0.08, 2.4, 8),
+            new THREE.MeshPhongMaterial({ color: 0x9aa5aa, metalness: 0.9 })
+        );
+        antenna.position.y = 2.8;
+        const signalLight = new THREE.PointLight(data.color, 0.3, 8);
+        signalLight.position.y = 1.1;
+        mesh.add(body, ring, antenna, signalLight);
         mesh.position.set(...data.pos);
+        mesh.userData.relay = true;
         scene.add(mesh);
 
         const sound = createGrottoSound(mesh, data.freq);
         if (sound) mesh.add(sound);
 
-        relays.push({ mesh, sound, data, active: false });
+        relays.push({ mesh, sound, data, active: false, signalLight, ring });
     });
 }
 
 function createMonster() {
-    const monsterMaterial = new THREE.MeshPhongMaterial({
-        color: 0x16030a,
-        emissive: 0x260008,
-        flatShading: true
-    });
-    monster = new THREE.Mesh(new THREE.IcosahedronGeometry(2.4, 1), monsterMaterial);
+    const monsterGroup = new THREE.Group();
+    const monsterMaterial = new THREE.MeshPhongMaterial({ color: 0x111216, emissive: 0x090305, flatShading: true });
+    const eyeMaterial = new THREE.MeshBasicMaterial({ color: 0xff2020 });
+    const finMaterial = new THREE.MeshPhongMaterial({ color: 0x25272c, flatShading: true });
+    const body = new THREE.Mesh(new THREE.IcosahedronGeometry(2.8, 1), monsterMaterial);
+    const mouth = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.18, 8, 16), new THREE.MeshBasicMaterial({ color: 0x380006 }));
+    mouth.position.z = -2.25;
+    mouth.rotation.x = Math.PI / 2;
+    const leftEye = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10), eyeMaterial);
+    const rightEye = leftEye.clone();
+    leftEye.position.set(-0.75, 0.65, -2.15);
+    rightEye.position.set(0.75, 0.65, -2.15);
+    const fin = new THREE.Mesh(new THREE.ConeGeometry(0.65, 2.8, 5), finMaterial);
+    fin.rotation.z = Math.PI / 2;
+    fin.position.x = 2.6;
+    const fin2 = fin.clone();
+    fin2.position.x = -2.6;
+    monsterGroup.add(body, mouth, leftEye, rightEye, fin, fin2);
+    monster = monsterGroup;
     monster.position.set(0, 0, -165);
     monster.visible = false;
     scene.add(monster);
@@ -330,19 +345,28 @@ function updateMission(text) {
     document.getElementById('mission').innerText = text;
 }
 
+function updateRelayStatus(index, active) {
+    const status = document.getElementById('relay-status');
+    const lines = status.innerHTML.split('<br>');
+    lines[index] = lines[index].replace('НЕ НАСТРОЕН', active ? 'ПЕРЕДАН' : 'НАВЕДИТЕ СВЕТ');
+    status.innerHTML = lines.join('<br>');
+}
+
 function tryActivateRelay() {
     if (relayCount >= relays.length || lightTimer <= 0) return;
 
     const relayMeshes = relays.filter((relay) => !relay.active).map((relay) => relay.mesh);
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
-    const hit = raycaster.intersectObjects(relayMeshes)[0];
+    const hit = raycaster.intersectObjects(relayMeshes, true)[0];
     if (!hit || hit.distance > 100) return;
 
-    const relay = relays.find((item) => item.mesh === hit.object);
+    const relay = relays.find((item) => hit.object === item.mesh || item.mesh.getObjectById(hit.object.id));
     if (!relay) return;
     relay.active = true;
     relayCount += 1;
-    relay.mesh.material.emissiveIntensity = 1.5;
+    relay.signalLight.intensity = 3;
+    relay.ring.material.color.set(0xffffff);
+    updateRelayStatus(relayCount - 1, true);
     updateMission(`РЕТРАНСЛЯТОРЫ: ${relayCount}/3`);
 
     if (relayCount === 1) {
