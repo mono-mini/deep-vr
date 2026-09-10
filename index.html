@@ -2,233 +2,539 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Abyssal Echo VR - Ambient Visibility</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Abyssal Echo VR - Бездонный сигнал</title>
     <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background: #000208; font-family: sans-serif; touch-action: none; }
         #overlay {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
             display: flex; flex-direction: column; justify-content: center; align-items: center;
-            color: white; z-index: 10; background: rgba(0,0,0,0.9); text-align: center;
+            color: white; z-index: 10; background: rgba(0,2,8,0.96); text-align: center;
         }
         button {
-            padding: 15px 30px; font-size: 18px; background: #222; color: #0f0;
-            border: 2px solid #0f0; border-radius: 8px; cursor: pointer; margin-top: 20px;
+            padding: 20px 40px; font-size: 20px; background: #051a2d; color: #00ffff;
+            border: 2px solid #00ffff; border-radius: 8px; cursor: pointer; margin-top: 20px;
         }
+        #ui-layer {
+            position: absolute; top: 10px; left: 10px; color: #00ffff;
+            font-family: monospace; font-size: 14px; z-index: 5; pointer-events: none;
+            text-shadow: 0 0 5px #00ffff;
+        }
+        #mission { margin-top: 6px; color: #fff; text-shadow: 0 0 5px #00ffff; }
+        #sensor-status { color: #8aa9b8; font-size: 13px; max-width: 80vw; }
     </style>
-    <!-- Three.js и WebXR кнопка -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/vr/VRButton.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/effects/StereoEffect.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/DeviceOrientationControls.js"></script>
 </head>
 <body>
 
+<div id="ui-layer">
+    ЭНЕРГИЯ: <span id="energy-val">10.0</span>%<br>
+    <span id="mission">РЕТРАНСЛЯТОРЫ: 0/3</span>
+</div>
+
 <div id="overlay">
-    <h1>Батискаф: Глубоководный сигнал</h1>
-    <p>Энергия: 10.0% | Запуск систем</p>
-    <button id="start-btn">ЗАПУСТИТЬ СИСТЕМЫ</button>
+    <h1>БАТИСКАФ: ПОДВОДНЫЕ ПЕЩЕРЫ</h1>
+    <p>Мягкий гул, глубокие воды</p>
+    <p id="sensor-status">Поворот: мышь или палец. Для гироскопа нужен HTTPS.</p>
+    <button id="start-btn">ПОГРУЖЕНИЕ (VR)</button>
 </div>
 
 <script>
-let scene, camera, renderer, listener;
-let spotLight, ambientLight, localLight;
+let scene, camera, renderer, effect, controls, listener;
+let spotLight, localLight, spotTarget;
 let energy = 10.0;
 let lightTimer = 0.0;
 let isBoosting = false;
 let isGameActive = false;
-let floorMesh;
+let monster, rescueCapsule;
+let monsterAwake = false;
+let noiseLevel = 0;
+let noisePosition = new THREE.Vector3();
+let relayCount = 0;
+let orientationActive = false;
+let lookActive = false;
+let lookPointerId = null;
+let lastPointerX = 0;
+let lastPointerY = 0;
+let manualYaw = 0;
+let manualPitch = 0;
+const useStereo = new URLSearchParams(location.search).has('stereo');
 
-// Объект батискафа (игрока)
 const subGroup = new THREE.Group();
-
-// Ретрансляторы
 const relays = [];
+const caveColliders = [];
+let planktonParticles, planktonGeo;
 
-document.getElementById('start-btn').addEventListener('click', () => {
+const raycaster = new THREE.Raycaster();
+const SUB_RADIUS = 1.2;
+
+document.getElementById('start-btn').addEventListener('click', async () => {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try {
+            const response = await DeviceOrientationEvent.requestPermission();
+            if (response !== 'granted') {
+                document.getElementById('sensor-status').innerText = 'Гироскоп запрещён. Используйте палец или мышь.';
+            }
+        } catch (e) { console.error(e); }
+    } else if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+        document.getElementById('sensor-status').innerText = 'HTTP по адресу сети: гироскоп заблокирован. Используйте палец или HTTPS.';
+    }
+
+    if (document.documentElement.requestFullscreen) {
+        document.documentElement.requestFullscreen();
+    }
+
+    listener = new THREE.AudioListener();
+    if (listener.context && listener.context.state === 'suspended') {
+        listener.context.resume();
+    }
+
     document.getElementById('overlay').style.display = 'none';
     init();
     animate();
 });
 
 function init() {
-    // 1. Сцена и Камера
     scene = new THREE.Scene();
 
-    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
-    
-    // Подключаем аудио-слушатель к камере (для 3D звука)
-    listener = new THREE.AudioListener();
+    // Убираем черный "космос": явно задаем подводный цвет сцены и туман
+    scene.background = new THREE.Color(0x000814);
+    scene.fog = new THREE.FogExp2(0x000814, 0.012);
+
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 150);
+    camera.rotation.order = 'YXZ';
+    controls = new THREE.DeviceOrientationControls(camera);
+    if (controls.connect) controls.connect();
     camera.add(listener);
 
     subGroup.position.set(0, 0, 0);
     subGroup.add(camera);
     scene.add(subGroup);
 
-    // 2. ОСВЕЩЕНИЕ
-    
-    // А) Слабое глобальное освещение, чтобы объекты не исчезали совсем
-    ambientLight = new THREE.AmbientLight(0x223344, 0.4);
-    scene.add(ambientLight);
+    // ОСВЕЩЕНИЕ
+    // Эмбиент свет синего тона, чтобы скалы не уходили в абсолютную темноту
+    scene.add(new THREE.AmbientLight(0x0a3850, 1.8));
 
-    // Б) Ближнее тусклое свечение батискафа (видимость ~0.7м вокруг себя)
-    localLight = new THREE.PointLight(0x00aaff, 1.5, 0.7); // Дальность ровно 0.7 метра
+    // Слабый габаритный свет помогает видеть кабину, но не убирает тьму вокруг.
+    localLight = new THREE.PointLight(0x00ffff, 1.4, 8.0);
     subGroup.add(localLight);
 
-    // В) Дальний мощный прожектор при нажатии кнопки
-    spotLight = new THREE.SpotLight(0xffffff, 0, 30, Math.PI / 4, 0.3, 1);
+    // Оба объекта являются дочерними камеры, поэтому луч следует за VR-поворотом.
+    spotLight = new THREE.SpotLight(0x00ffff, 0, 100, Math.PI / 4, 0.45, 1);
     spotLight.position.set(0, 0, 0);
-    spotLight.target.position.set(0, 0, -1);
-    subGroup.add(spotLight);
-    subGroup.add(spotLight.target);
+    spotTarget = new THREE.Object3D();
+    spotTarget.position.set(0, 0, -10);
+    camera.add(spotTarget);
+    spotLight.target = spotTarget;
+    camera.add(spotLight);
 
-    // 3. Рендерер с поддержкой WebXR
     renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.xr.enabled = true;
+    renderer.outputEncoding = THREE.sRGBEncoding;
     document.body.appendChild(renderer.domElement);
-    document.body.appendChild(VRButton.createButton(renderer));
 
-    // 4. Окружение и Ретрансляторы
-    createEnvironment();
+    effect = new THREE.StereoEffect(renderer);
+    effect.setSize(window.innerWidth, window.innerHeight);
+
+    createCaves();
+    createPlankton();
     createRelays();
+    createMonster();
+    createRescueCapsule();
 
-    // 5. Обработка ввода (Единственная кнопка VR / Экран)
-    const controller = renderer.xr.getController(0);
-    controller.addEventListener('selectstart', onPointerDown);
-    controller.addEventListener('selectend', onPointerUp);
-    
     window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    window.addEventListener('deviceorientation', onDeviceOrientation);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('resize', onWindowResize);
 
     isGameActive = true;
 }
 
-function createEnvironment() {
-    // Частицы планктона (теперь они светятся сами по себе)
-    const geometry = new THREE.BufferGeometry();
+function createCaves() {
+    // Яркая синевато-каменная текстура с подсвеченными контурами
+    const wallMaterial = new THREE.MeshPhongMaterial({
+        color: 0x16465c,
+        emissive: 0x0a2d40,
+        shininess: 5,
+        flatShading: true,
+        side: THREE.DoubleSide
+    });
+
+    const wireMaterial = new THREE.MeshBasicMaterial({
+        color: 0x00ffff,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.2,
+        side: THREE.DoubleSide
+    });
+
+    const numSegments = 40;
+    for (let i = 0; i < numSegments; i++) {
+        const zPos = -i * 10;
+        const radius = 6 + Math.sin(i * 0.7) * 2.5;
+
+        const segmentGeo = new THREE.CylinderGeometry(radius, radius, 10, 12, 2, true);
+
+        // Деформация геометрии
+        const pos = segmentGeo.attributes.position;
+        for (let j = 0; j < pos.count; j++) {
+            pos.setX(j, pos.getX(j) + (Math.random() - 0.5) * 2.5);
+            pos.setY(j, pos.getY(j) + (Math.random() - 0.5) * 2.5);
+        }
+
+        segmentGeo.computeVertexNormals();
+
+        const wallMesh = new THREE.Mesh(segmentGeo, wallMaterial);
+        // Разворачиваем цилиндр вдоль тоннеля Z
+        wallMesh.rotation.x = Math.PI / 2;
+        wallMesh.position.set(
+            i === 0 ? 0 : Math.sin(i * 0.4) * 5,
+            i === 0 ? 0 : Math.cos(i * 0.3) * 3,
+            zPos
+        );
+
+        const wireMesh = new THREE.Mesh(segmentGeo, wireMaterial);
+        wallMesh.add(wireMesh);
+
+        scene.add(wallMesh);
+        caveColliders.push(wallMesh);
+    }
+}
+
+function createPlankton() {
+    planktonGeo = new THREE.BufferGeometry();
     const count = 400;
     const positions = new Float32Array(count * 3);
 
     for (let i = 0; i < count * 3; i += 3) {
         positions[i] = (Math.random() - 0.5) * 30;
         positions[i+1] = (Math.random() - 0.5) * 30;
-        positions[i+2] = (Math.random() - 0.5) * 100;
+        positions[i+2] = (Math.random() - 0.5) * 30;
     }
 
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const material = new THREE.PointsMaterial({ size: 0.1, color: 0x00ffff });
-    const particles = new THREE.Points(geometry, material);
-    scene.add(particles);
+    planktonGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.PointsMaterial({
+        size: 0.15,
+        color: 0x00ffff,
+        transparent: true,
+        opacity: 0.7
+    });
 
-    // Пол с яркими сетчатыми линиями, чтобы всегда видеть движение
-    const grid = new THREE.GridHelper(200, 50, 0x00ff88, 0x114433);
-    grid.position.y = -2;
-    scene.add(grid);
+    planktonParticles = new THREE.Points(planktonGeo, material);
+    scene.add(planktonParticles);
+}
+
+function updatePlankton() {
+    if (!planktonParticles) return;
+    planktonParticles.position.copy(subGroup.position);
+
+    const pos = planktonGeo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+        let z = pos.getZ(i);
+        if (z > 15) pos.setZ(i, z - 30);
+        if (z < -15) pos.setZ(i, z + 30);
+    }
+    pos.needsUpdate = true;
+}
+
+function createGrottoSound(relay, freq) {
+    const sound = new THREE.PositionalAudio(listener);
+    const audioCtx = listener.context;
+    if (!audioCtx) return null;
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(freq + 100, audioCtx.currentTime);
+    filter.Q.setValueAtTime(1, audioCtx.currentTime);
+
+    setInterval(() => {
+        if (audioCtx.state === 'running') {
+            gain.gain.cancelScheduledValues(audioCtx.currentTime);
+            gain.gain.setValueAtTime(0.01, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0.18, audioCtx.currentTime + 0.3);
+            gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+        }
+    }, 700);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    sound.setNodeSource(gain);
+    sound.setRefDistance(2);
+    sound.setMaxDistance(60);
+
+    osc.start();
+    return sound;
 }
 
 function createRelays() {
     const relayData = [
-        { pos: [0, -1, -15], freq: 880, type: 'sine', color: 0xff0055 },      
-        { pos: [10, -1, -35], freq: 110, type: 'sawtooth', color: 0x00ff55 },    
-        { pos: [-6, -1, -60], freq: 300, type: 'square', color: 0xffff00 }          
+        { pos: [1, -2, -35], freq: 880, color: 0xff0055, label: 'ВЫСОКИЙ ПИСК' },
+        { pos: [-6, 3, -110], freq: 110, color: 0x00ff55, label: 'НИЗКИЙ ГУЛ' },
+        { pos: [9, -1, -220], freq: 55, color: 0xffff00, label: 'МЕТАЛЛИЧЕСКИЙ СКРЕЖЕТ' }
     ];
 
     relayData.forEach((data) => {
-        // Ретрансляторы со слабо светящимися индикаторами
-        const geo = new THREE.CylinderGeometry(0.4, 0.4, 2, 12);
-        const mat = new THREE.MeshPhongMaterial({ 
-            color: data.color, 
-            emissive: data.color, 
-            emissiveIntensity: 0.2 // Легкое собственное свечение
-        });
-        
+        const geo = new THREE.CylinderGeometry(0.8, 0.8, 4.0, 16);
+        const mat = new THREE.MeshPhongMaterial({ color: data.color, emissive: data.color, emissiveIntensity: 0.25 });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.set(...data.pos);
         scene.add(mesh);
 
-        // 3D Звук ретранслятора
-        const sound = new THREE.PositionalAudio(listener);
-        const audioCtx = listener.context;
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-        
-        osc.type = data.type;
-        osc.frequency.setValueAtTime(data.freq, audioCtx.currentTime);
-        osc.start();
-        
-        setInterval(() => {
-            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
-        }, 800);
+        const sound = createGrottoSound(mesh, data.freq);
+        if (sound) mesh.add(sound);
 
-        osc.connect(gain);
-        sound.setNodeSource(gain);
-        sound.setRefDistance(2);
-        sound.setMaxDistance(40);
-
-        mesh.add(sound);
-        relays.push({ mesh, sound });
+        relays.push({ mesh, sound, data, active: false });
     });
+}
+
+function createMonster() {
+    const monsterMaterial = new THREE.MeshPhongMaterial({
+        color: 0x16030a,
+        emissive: 0x260008,
+        flatShading: true
+    });
+    monster = new THREE.Mesh(new THREE.IcosahedronGeometry(2.4, 1), monsterMaterial);
+    monster.position.set(0, 0, -165);
+    monster.visible = false;
+    scene.add(monster);
+}
+
+function createRescueCapsule() {
+    const capsuleMaterial = new THREE.MeshPhongMaterial({
+        color: 0xffb000,
+        emissive: 0x5a2600,
+        emissiveIntensity: 0.8
+    });
+    rescueCapsule = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 5, 16), capsuleMaterial);
+    rescueCapsule.rotation.z = Math.PI / 2;
+    rescueCapsule.position.set(0, 0, -285);
+    const capsuleLight = new THREE.PointLight(0xffaa00, 2, 16);
+    rescueCapsule.add(capsuleLight);
+    scene.add(rescueCapsule);
+}
+
+function updateMission(text) {
+    document.getElementById('mission').innerText = text;
+}
+
+function tryActivateRelay() {
+    if (relayCount >= relays.length || lightTimer <= 0) return;
+
+    const relayMeshes = relays.filter((relay) => !relay.active).map((relay) => relay.mesh);
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const hit = raycaster.intersectObjects(relayMeshes)[0];
+    if (!hit || hit.distance > 100) return;
+
+    const relay = relays.find((item) => item.mesh === hit.object);
+    if (!relay) return;
+    relay.active = true;
+    relayCount += 1;
+    relay.mesh.material.emissiveIntensity = 1.5;
+    updateMission(`РЕТРАНСЛЯТОРЫ: ${relayCount}/3`);
+
+    if (relayCount === 1) {
+        monsterAwake = true;
+        monster.visible = true;
+        updateMission('РЕТРАНСЛЯТОРЫ: 1/3 | НЕ ШУМИ');
+    } else if (relayCount === 3) {
+        updateMission('СИГНАЛ ПРИНЯТ | ДОПЛЫВИТЕ ДО КАПСУЛЫ');
+    }
+}
+
+function updateMonster(dt) {
+    if (!monsterAwake || !monster || noiseLevel <= 0) return;
+    const toSub = noisePosition.clone().sub(monster.position);
+    const distance = toSub.length();
+    if (distance > 1.8) {
+        monster.position.add(toSub.normalize().multiplyScalar(2.2 * dt));
+    } else {
+        noiseLevel = 0;
+    }
+}
+
+function checkRescue() {
+    if (relayCount === 3 && rescueCapsule && subGroup.position.distanceTo(rescueCapsule.position) < 5) {
+        isGameActive = false;
+        updateMission('СПАСЕНИЕ УСПЕШНО | СИГНАЛ ПЕРЕДАН');
+    }
+}
+
+function checkCollisions(moveVector) {
+    if (moveVector.lengthSq() === 0) return false;
+    const rayDir = moveVector.clone().normalize();
+    raycaster.set(subGroup.position, rayDir);
+    const intersects = raycaster.intersectObjects(caveColliders);
+    if (intersects.length > 0 && intersects[0].distance < SUB_RADIUS) {
+        return true;
+    }
+    return false;
 }
 
 function playClickSound() {
     const audioCtx = listener.context;
-    if (!audioCtx) return;
+    if (!audioCtx || audioCtx.state !== 'running') return;
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.type = 'triangle';
-    osc.frequency.setValueAtTime(1200, audioCtx.currentTime);
-    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
+    osc.frequency.setValueAtTime(1400, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.04);
     osc.connect(gain);
     gain.connect(audioCtx.destination);
     osc.start();
-    osc.stop(audioCtx.currentTime + 0.05);
+    osc.stop(audioCtx.currentTime + 0.04);
 }
 
-function onPointerDown() {
+function playCollisionSound() {
+    const audioCtx = listener.context;
+    if (!audioCtx || audioCtx.state !== 'running') return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    const filter = audioCtx.createBiquadFilter();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(200, audioCtx.currentTime);
+
+    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.25);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.25);
+}
+
+function onPointerDown(e) {
+    if (e.target.tagName === 'BUTTON') return;
     if (!isGameActive || energy <= 0) return;
+
+    lookActive = true;
+    lookPointerId = e.pointerId;
+    lastPointerX = e.clientX;
+    lastPointerY = e.clientY;
 
     if (energy >= 0.3) {
         energy -= 0.3;
-        lightTimer = 1.0; // Вспышка мощного прожектора на 1 сек
+        lightTimer = 1.0;
+        noiseLevel = 1;
+        noisePosition.copy(subGroup.position);
         playClickSound();
     }
     isBoosting = true;
 }
 
-function onPointerUp() {
+function onPointerMove(e) {
+    if (!lookActive || e.pointerId !== lookPointerId || orientationActive) return;
+
+    manualYaw -= (e.clientX - lastPointerX) * 0.004;
+    manualPitch -= (e.clientY - lastPointerY) * 0.004;
+    manualPitch = THREE.MathUtils.clamp(manualPitch, -Math.PI / 2.2, Math.PI / 2.2);
+    lastPointerX = e.clientX;
+    lastPointerY = e.clientY;
+}
+
+function onPointerUp(e) {
+    if (e && e.pointerId !== lookPointerId) return;
+    lookActive = false;
+    lookPointerId = null;
     isBoosting = false;
 }
 
-function animate() {
-    renderer.setAnimationLoop(render);
+function onDeviceOrientation(e) {
+    if (e.beta !== null && (Math.abs(e.beta) > 0.1 || Math.abs(e.gamma) > 0.1 || Math.abs(e.alpha) > 0.1)) {
+        orientationActive = true;
+    }
 }
 
-function render() {
-    const dt = 0.016; 
+function onKeyDown(e) {
+    const turnSpeed = 0.06;
+    if (e.key === 'ArrowLeft') manualYaw += turnSpeed;
+    if (e.key === 'ArrowRight') manualYaw -= turnSpeed;
+    if (e.key === 'ArrowUp') manualPitch = THREE.MathUtils.clamp(manualPitch - turnSpeed, -Math.PI / 2.2, Math.PI / 2.2);
+    if (e.key === 'ArrowDown') manualPitch = THREE.MathUtils.clamp(manualPitch + turnSpeed, -Math.PI / 2.2, Math.PI / 2.2);
+    if (e.code === 'Space') isBoosting = true;
+}
+
+function onKeyUp(e) {
+    if (e.code === 'Space') isBoosting = false;
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    effect.setSize(window.innerWidth, window.innerHeight);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+
+    const dt = 0.016;
 
     if (isGameActive && energy > 0) {
-        const speed = isBoosting ? 4.0 : 1.2;
+        if (orientationActive) {
+            controls.update();
+        } else {
+            camera.rotation.set(manualPitch, manualYaw, 0);
+        }
+
+        const speed = isBoosting ? 4.5 : 1.3;
         const drainRate = isBoosting ? 0.09 : 0.05;
 
         energy -= drainRate * dt;
         if (energy < 0) energy = 0;
 
-        // Движение вперед по взгляду
+        document.getElementById('energy-val').innerText = energy.toFixed(1);
+
         const dir = new THREE.Vector3();
         camera.getWorldDirection(dir);
-        subGroup.position.addScaledVector(dir, speed * dt);
+        const moveStep = dir.clone().multiplyScalar(speed * dt);
 
-        // Вспышка дальнобойного прожектора
+        if (!checkCollisions(moveStep)) {
+            subGroup.position.add(moveStep);
+        } else {
+            playCollisionSound();
+        }
+
+        updatePlankton();
+
+        // Настройка импульса сонара
         if (lightTimer > 0) {
             lightTimer -= dt;
-            spotLight.intensity = Math.max(0, lightTimer * 15); 
+            spotLight.intensity = Math.max(0, lightTimer * 40);
+            tryActivateRelay();
         } else {
             spotLight.intensity = 0;
         }
+
+        noiseLevel = Math.max(0, noiseLevel - dt * 2);
+        updateMonster(dt);
+        checkRescue();
     }
 
-    renderer.render(scene, camera);
+    if (useStereo) {
+        effect.render(scene, camera);
+    } else {
+        renderer.render(scene, camera);
+    }
 }
 </script>
 </body>
