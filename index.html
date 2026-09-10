@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Abyssal Echo VR - Ambient Visibility</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            color: white; z-index: 10; background: rgba(0,0,0,0.9); text-align: center;
+        }
+        button {
+            padding: 15px 30px; font-size: 18px; background: #222; color: #0f0;
+            border: 2px solid #0f0; border-radius: 8px; cursor: pointer; margin-top: 20px;
+        }
+    </style>
+    <!-- Three.js и WebXR кнопка -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/vr/VRButton.js"></script>
+</head>
+<body>
+
+<div id="overlay">
+    <h1>Батискаф: Глубоководный сигнал</h1>
+    <p>Энергия: 10.0% | Запуск систем</p>
+    <button id="start-btn">ЗАПУСТИТЬ СИСТЕМЫ</button>
+</div>
+
+<script>
+let scene, camera, renderer, listener;
+let spotLight, ambientLight, localLight;
+let energy = 10.0;
+let lightTimer = 0.0;
+let isBoosting = false;
+let isGameActive = false;
+let floorMesh;
+
+// Объект батискафа (игрока)
+const subGroup = new THREE.Group();
+
+// Ретрансляторы
+const relays = [];
+
+document.getElementById('start-btn').addEventListener('click', () => {
+    document.getElementById('overlay').style.display = 'none';
+    init();
+    animate();
+});
+
+function init() {
+    // 1. Сцена и Камера
+    scene = new THREE.Scene();
+
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 100);
+    
+    // Подключаем аудио-слушатель к камере (для 3D звука)
+    listener = new THREE.AudioListener();
+    camera.add(listener);
+
+    subGroup.position.set(0, 0, 0);
+    subGroup.add(camera);
+    scene.add(subGroup);
+
+    // 2. ОСВЕЩЕНИЕ
+    
+    // А) Слабое глобальное освещение, чтобы объекты не исчезали совсем
+    ambientLight = new THREE.AmbientLight(0x223344, 0.4);
+    scene.add(ambientLight);
+
+    // Б) Ближнее тусклое свечение батискафа (видимость ~0.7м вокруг себя)
+    localLight = new THREE.PointLight(0x00aaff, 1.5, 0.7); // Дальность ровно 0.7 метра
+    subGroup.add(localLight);
+
+    // В) Дальний мощный прожектор при нажатии кнопки
+    spotLight = new THREE.SpotLight(0xffffff, 0, 30, Math.PI / 4, 0.3, 1);
+    spotLight.position.set(0, 0, 0);
+    spotLight.target.position.set(0, 0, -1);
+    subGroup.add(spotLight);
+    subGroup.add(spotLight.target);
+
+    // 3. Рендерер с поддержкой WebXR
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    document.body.appendChild(VRButton.createButton(renderer));
+
+    // 4. Окружение и Ретрансляторы
+    createEnvironment();
+    createRelays();
+
+    // 5. Обработка ввода (Единственная кнопка VR / Экран)
+    const controller = renderer.xr.getController(0);
+    controller.addEventListener('selectstart', onPointerDown);
+    controller.addEventListener('selectend', onPointerUp);
+    
+    window.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointerup', onPointerUp);
+
+    isGameActive = true;
+}
+
+function createEnvironment() {
+    // Частицы планктона (теперь они светятся сами по себе)
+    const geometry = new THREE.BufferGeometry();
+    const count = 400;
+    const positions = new Float32Array(count * 3);
+
+    for (let i = 0; i < count * 3; i += 3) {
+        positions[i] = (Math.random() - 0.5) * 30;
+        positions[i+1] = (Math.random() - 0.5) * 30;
+        positions[i+2] = (Math.random() - 0.5) * 100;
+    }
+
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const material = new THREE.PointsMaterial({ size: 0.1, color: 0x00ffff });
+    const particles = new THREE.Points(geometry, material);
+    scene.add(particles);
+
+    // Пол с яркими сетчатыми линиями, чтобы всегда видеть движение
+    const grid = new THREE.GridHelper(200, 50, 0x00ff88, 0x114433);
+    grid.position.y = -2;
+    scene.add(grid);
+}
+
+function createRelays() {
+    const relayData = [
+        { pos: [0, -1, -15], freq: 880, type: 'sine', color: 0xff0055 },      
+        { pos: [10, -1, -35], freq: 110, type: 'sawtooth', color: 0x00ff55 },    
+        { pos: [-6, -1, -60], freq: 300, type: 'square', color: 0xffff00 }          
+    ];
+
+    relayData.forEach((data) => {
+        // Ретрансляторы со слабо светящимися индикаторами
+        const geo = new THREE.CylinderGeometry(0.4, 0.4, 2, 12);
+        const mat = new THREE.MeshPhongMaterial({ 
+            color: data.color, 
+            emissive: data.color, 
+            emissiveIntensity: 0.2 // Легкое собственное свечение
+        });
+        
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.set(...data.pos);
+        scene.add(mesh);
+
+        // 3D Звук ретранслятора
+        const sound = new THREE.PositionalAudio(listener);
+        const audioCtx = listener.context;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        
+        osc.type = data.type;
+        osc.frequency.setValueAtTime(data.freq, audioCtx.currentTime);
+        osc.start();
+        
+        setInterval(() => {
+            gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+        }, 800);
+
+        osc.connect(gain);
+        sound.setNodeSource(gain);
+        sound.setRefDistance(2);
+        sound.setMaxDistance(40);
+
+        mesh.add(sound);
+        relays.push({ mesh, sound });
+    });
+}
+
+function playClickSound() {
+    const audioCtx = listener.context;
+    if (!audioCtx) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1200, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + 0.05);
+}
+
+function onPointerDown() {
+    if (!isGameActive || energy <= 0) return;
+
+    if (energy >= 0.3) {
+        energy -= 0.3;
+        lightTimer = 1.0; // Вспышка мощного прожектора на 1 сек
+        playClickSound();
+    }
+    isBoosting = true;
+}
+
+function onPointerUp() {
+    isBoosting = false;
+}
+
+function animate() {
+    renderer.setAnimationLoop(render);
+}
+
+function render() {
+    const dt = 0.016; 
+
+    if (isGameActive && energy > 0) {
+        const speed = isBoosting ? 4.0 : 1.2;
+        const drainRate = isBoosting ? 0.09 : 0.05;
+
+        energy -= drainRate * dt;
+        if (energy < 0) energy = 0;
+
+        // Движение вперед по взгляду
+        const dir = new THREE.Vector3();
+        camera.getWorldDirection(dir);
+        subGroup.position.addScaledVector(dir, speed * dt);
+
+        // Вспышка дальнобойного прожектора
+        if (lightTimer > 0) {
+            lightTimer -= dt;
+            spotLight.intensity = Math.max(0, lightTimer * 15); 
+        } else {
+            spotLight.intensity = 0;
+        }
+    }
+
+    renderer.render(scene, camera);
+}
+</script>
+</body>
+</html>
